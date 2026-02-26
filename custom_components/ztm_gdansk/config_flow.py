@@ -31,29 +31,23 @@ def fetch_stops(keywords: list) -> dict:
         resp.raise_for_status()
         raw = resp.json()
 
-        # API zwraca albo {"stops": [...]} albo bezpośrednio listę
-        if isinstance(raw, list):
+        # ✅ API zwraca {"2026-02-26": {"stops": [...], "lastUpdate": "..."}}
+        # Pobieramy wartość pierwszego (jedynego) klucza — daty
+        if isinstance(raw, dict):
+            date_key = next(iter(raw))          # np. "2026-02-26"
+            inner = raw[date_key]               # {"lastUpdate": ..., "stops": [...]}
+            stops_list = inner.get("stops", [])
+        elif isinstance(raw, list):
             stops_list = raw
         else:
-            stops_list = raw.get("stops", [])
+            stops_list = []
 
         _LOGGER.debug("Pobrano %d przystanków z API", len(stops_list))
 
         result = {}
         for stop in stops_list:
-            # Różne API mogą używać różnych kluczy
-            name = (
-                stop.get("stopName")
-                or stop.get("name")
-                or stop.get("stop_name")
-                or ""
-            )
-            stop_id = str(
-                stop.get("stopId")
-                or stop.get("id")
-                or stop.get("stop_id")
-                or ""
-            )
+            name    = stop.get("stopName", "")
+            stop_id = str(stop.get("stopId", ""))
 
             if not name or not stop_id:
                 continue
@@ -77,6 +71,7 @@ def fetch_stops(keywords: list) -> dict:
     except Exception as e:
         _LOGGER.error("Nieoczekiwany błąd pobierania przystanków: %s", e)
         return {}
+
 
 
 class ZTMGdanskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
