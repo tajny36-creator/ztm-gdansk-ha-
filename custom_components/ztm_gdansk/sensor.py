@@ -81,11 +81,10 @@ class ZTMDepartureSensor(CoordinatorEntity, SensorEntity):
     @property
     def extra_state_attributes(self) -> dict:
         deps = self._get_departures()
-        raw  = self.coordinator.data or {}
         return {
             "przystanek":            self._stop_name,
             "stop_id":               self._entry.data["stop_id"],
-            "ostatnia_aktualizacja": raw.get("lastUpdate", ""),
+            "ostatnia_aktualizacja": datetime.now(timezone.utc).strftime("%H:%M:%S"),
             "liczba_odjazdow":       len(deps),
             "odjazdy":               deps,
             "tablica":               self._build_text_table(deps),
@@ -107,7 +106,6 @@ class ZTMDepartureSensor(CoordinatorEntity, SensorEntity):
                 if not estimated:
                     continue
 
-                # API zwraca ISO 8601 np. "2026-02-27T00:00:00Z"
                 est_dt = datetime.fromisoformat(estimated.replace("Z", "+00:00"))
                 sch_dt = datetime.fromisoformat(scheduled.replace("Z", "+00:00"))
 
@@ -117,7 +115,6 @@ class ZTMDepartureSensor(CoordinatorEntity, SensorEntity):
 
                 in_min = max(0, int(in_sec // 60))
 
-                # Opóźnienie — najpierw z pola delayInSeconds, fallback z różnicy czasów
                 delay_sec = dep.get("delayInSeconds") or int((est_dt - sch_dt).total_seconds())
 
                 if delay_sec is not None and delay_sec > 60:
