@@ -24,17 +24,21 @@ class ZTMGdanskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Pobiera wszystkie przystanki z API ZTM."""
         try:
             session = async_get_clientsession(self.hass)
-            async with session.get(STOPS_URL, timeout=15) as resp:
-                if resp.status != 200:
-                    return {}
-                raw = await resp.json(content_type=None)
+            resp = await session.get(STOPS_URL, timeout=30)
+            if resp.status != 200:
+                _LOGGER.error("ZTM API zwróciło HTTP %s", resp.status)
+                return {}
 
+            raw = await resp.json(content_type=None)
+
+            # Struktura: {"2026-02-26": {"stops": [...]}}
             if isinstance(raw, dict):
                 date_key = next(iter(raw))
                 stops_list = raw[date_key].get("stops", [])
             elif isinstance(raw, list):
                 stops_list = raw
             else:
+                _LOGGER.error("ZTM API — nieznany format danych: %s", type(raw))
                 return {}
 
             result = {}
@@ -49,21 +53,21 @@ class ZTMGdanskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         "sub":  sub,
                         "desc": desc,
                     }
+
+            _LOGGER.debug("ZTM: załadowano %d przystanków", len(result))
             return result
 
         except Exception as e:
-            _LOGGER.error("Błąd pobierania przystanków ZTM: %s", e)
+            _LOGGER.error("ZTM: wyjątek przy pobieraniu przystanków: %s", e)
             return {}
 
     async def async_step_user(self, user_input=None):
-        """Jedyny krok — wpisz numer przystanku + liczba odjazdów."""
         errors = {}
 
         if user_input is not None:
             stop_id = str(user_input["stop_id"]).strip()
             max_dep = int(user_input["max_departures"])
 
-            # Pobierz przystanki jeśli jeszcze nie mamy
             if not self._all_stops:
                 self._all_stops = await self._async_fetch_stops()
 
