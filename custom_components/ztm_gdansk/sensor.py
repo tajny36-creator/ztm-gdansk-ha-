@@ -17,7 +17,6 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN = "ztm_gdansk"
 DEPARTURES_URL = "https://ckan2.multimediagdansk.pl/departures?stopId={stop_id}"
 SCAN_INTERVAL = timedelta(seconds=30)
-WARSAW_TZ = timezone(timedelta(hours=1))  # CET; HA obsłuży DST przez lokalny czas
 
 
 async def async_setup_entry(
@@ -27,7 +26,7 @@ async def async_setup_entry(
 ) -> None:
     stop_id   = entry.data["stop_id"]
     stop_name = entry.data.get("stop_name", stop_id)
-    max_dep   = entry.data.get("max_departures", 6)
+    max_dep   = int(entry.data.get("max_departures", 6))
 
     coordinator = ZTMCoordinator(hass, stop_id, max_dep)
     await coordinator.async_config_entry_first_refresh()
@@ -61,126 +60,119 @@ class ZTMCoordinator(DataUpdateCoordinator):
 class ZTMDepartureSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, entry, stop_name, max_dep):
         super().__init__(coordinator)
-        self._entry      = entry
-        self._stop_name  = stop_name
-        self._max_dep    = max_dep
-        self._attr_name  = f"ZTM {stop_name}"
+        self._entry     = entry
+        self._stop_name = stop_name
+        self._max_dep   = max_dep
+        self._attr_name      = f"ZTM {stop_name}"
         self._attr_unique_id = f"ztm_gdansk_{entry.data['stop_id']}"
-        self._attr_icon  = "mdi:bus-clock"
+        self._attr_icon      = "mdi:bus-clock"
 
     @property
-    def native_value(self):
-        """Pierwsza odjeżdżająca linia — główna wartość sensora."""
+    def native_value(self) -> str:
         deps = self._get_departures()
         if not deps:
             return "Brak odjazdów"
-        first = deps[0]
-        return f"{first['line']} → {first['headsign']} za {first['in_min']} min"
+        d = deps[0]
+        return f"{d['linia']} → {d['kierunek']} za {d['za_minuty']} min"
 
     @property
-    def extra_state_attributes(self):
-        """Pełna tablica odjazdów + metadane."""
+    def extra_state_attributes(self) -> dict:
         deps = self._get_departures()
-        now  = datetime.now(timezone.utc)
-
-        # Buduj tablicę jak na stronie ZTM
-        table_rows = []
-        for d in deps:
-            table_rows.append({
-                "linia":       d["line"],
-                "kierunek":    d["headsign"],
-                "odjazd":      d["scheduled"],
-                "rzeczywisty": d["estimated"],
-                "opoznienie":  d["delay_str"],
-                "status":      d["status"],
-                "za_minuty":   d["in_min"],
-            })
-
-        raw = self.coordinator.data or {}
-        last_update = raw.get("lastUpdate", "")
-
+        raw  = self.coordinator.data or {}
         return {
-            "przystanek":      self._stop_name,
-            "stop_id":         self._entry.data["stop_id"],
-            "ostatnia_aktualizacja": last_update,
-            "liczba_odjazdow": len(deps),
-            "odjazdy":         table_rows,
-            # Skrócona tablica tekstowa — czytelna w Lovelace
-            "tablica": self._build_text_table(deps),
+            "przystanek":            self._stop_name,
+            "stop_id":               self._entry.data["stop_id"],
+            "ostatnia_aktualizacja": raw.get("lastUpdate", ""),
+            "liczba_odjazdow":       len(deps),
+            "odjazdy":               deps,
+            "tablica":               self._build_text_table(deps),
         }
 
     def _get_departures(self) -> list:
-        raw = self.coordinator.data or {}
+        raw        = self.coordinator.data or {}
         departures = raw.get("departures", [])
-        now = datetime.now(timezone.utc)
-        result = []
+        now        = datetime.now(timezone.utc)
+        result     = []
 
-        for dep in departures[: self._max_dep * 2]:  # weź z zapasem, odfiltruj przeszłe
+        for dep in departures:
             try:
-                estimated_str  = dep.get("estimatedTime") or dep.get("theoreticalTime", "")
-                scheduled_str  = dep.get("theoreticalTime", "")
-                delay_sec      = dep.get("delayInSeconds", 0)
-                line           = dep.get("routeShortName", "?")
-                headsign       = dep.get("headsign", "?")
-                status         = dep.get("status", "SCHEDULED")
+                estimated  = dep.get("estimatedTime", "") or dep.get("theoreticalTime", "")
+                scheduled  = dep.get("theoreticalTime", "")
+                line       = str(dep.get("routeShortName", dep.get("routeId", "?")))
+                headsign   = dep.get("headsign", dep.get("tripHeadsign", ""))
 
-                if not estimated_str:
+                if not estimated:
                     continue
 
-                est_dt  = datetime.fromisoformat(estimated_str.replace("Z", "+00:00"))
-                sched_dt = datetime.fromisoformat(scheduled_str.replace("Z", "+00:00")) if scheduled_str else est_dt
+                # Parsuj czas — format "HH:MM:SS" lub ISO
+                def parse_time(t: str) -> datetime | None:
+                    if not t:
+                        return None
+                    try:
+                        today = now.date()
+                        h, m, s = map(int, t.strip().split(":"))
+                        # Obsługa kursów po północy (h >= 24)
+                        dt = datetime(today.year, today.month, today.day,
+                                      tzinfo=timezone.utc) + timedelta(hours=h, minutes=m, seconds=s)
+                        # Jeśli czas jest w przeszłości > 1h, to pewnie jutrzejszy
+                        if (now - dt).total_seconds() > 3600:
+                            dt += timedelta(days=1)
+                        return dt
+                    except Exception:
+                        return None
 
-                # Pomijaj odjazdy które już minęły
-                if est_dt < now - timedelta(seconds=30):
+                est_dt  = parse_time(estimated)
+                sch_dt  = parse_time(scheduled)
+
+                if est_dt is None:
                     continue
 
-                in_min = max(0, int((est_dt - now).total_seconds() / 60))
+                in_sec  = (est_dt - now).total_seconds()
+                if in_sec < -60:
+                    continue  # już odjechał
 
-                # Formatuj czas lokalnie (Polska)
-                local_est   = est_dt.astimezone(timezone(timedelta(hours=1)))
-                local_sched = sched_dt.astimezone(timezone(timedelta(hours=1)))
+                in_min  = max(0, int(in_sec // 60))
 
-                delay_min = delay_sec // 60
+                delay_sec = 0
+                if sch_dt:
+                    delay_sec = int((est_dt - sch_dt).total_seconds())
+
                 if delay_sec > 60:
-                    delay_str = f"+{delay_min} min"
+                    delay_str = f"+{delay_sec // 60} min"
+                    status    = "opóźniony"
                 elif delay_sec < -60:
-                    delay_str = f"{delay_min} min"
+                    delay_str = f"{delay_sec // 60} min"
+                    status    = "wcześniej"
                 else:
                     delay_str = "na czas"
+                    status    = "punktualny"
 
                 result.append({
-                    "line":      line,
-                    "headsign":  headsign,
-                    "scheduled": local_sched.strftime("%H:%M"),
-                    "estimated": local_est.strftime("%H:%M"),
-                    "delay_str": delay_str,
-                    "delay_sec": delay_sec,
-                    "status":    status,
-                    "in_min":    in_min,
-                    "est_dt":    est_dt,
+                    "linia":       line,
+                    "kierunek":    headsign,
+                    "odjazd":      scheduled,
+                    "rzeczywisty": estimated,
+                    "opoznienie":  delay_str,
+                    "status":      status,
+                    "za_minuty":   in_min,
                 })
 
             except Exception as e:
                 _LOGGER.debug("Błąd parsowania odjazdu: %s", e)
                 continue
 
-        # Sortuj po czasie rzeczywistym
-        result.sort(key=lambda x: x["est_dt"])
-        return result[: self._max_dep]
+            if len(result) >= self._max_dep:
+                break
+
+        return result
 
     def _build_text_table(self, deps: list) -> str:
-        """Buduje czytelną tablicę tekstową — jak wyświetlacz na przystanku."""
         if not deps:
-            return "Brak odjazdów"
-
-        lines = [f"{'LINIA':<6} {'KIERUNEK':<25} {'GODZ':>5} {'ZA':>5}  STATUS"]
-        lines.append("─" * 55)
-
+            return "_Brak nadchodzących odjazdów_"
+        lines = ["| Linia | Kierunek | Za (min) | Status |",
+                 "|-------|----------|----------|--------|"]
         for d in deps:
-            headsign = d["headsign"][:24]
-            status   = d["delay_str"]
             lines.append(
-                f"{d['line']:<6} {headsign:<25} {d['estimated']:>5} {d['in_min']:>3}min  {status}"
+                f"| **{d['linia']}** | {d['kierunek']} | {d['za_minuty']} | {d['status']} |"
             )
-
         return "\n".join(lines)
