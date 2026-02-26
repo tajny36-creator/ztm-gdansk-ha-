@@ -1,4 +1,4 @@
-"""Config Flow — GUI konfiguracji ZTM Gdańsk w Home Assistant."""
+"""Config Flow — ZTM Gdańsk."""
 import logging
 import voluptuous as vol
 from homeassistant import config_entries
@@ -25,105 +25,151 @@ LOCATIONS = {
 
 
 class ZTMGdanskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Obsługuje konfigurację przez GUI Home Assistant."""
-
     VERSION = 1
 
     def __init__(self):
         self._location: str = "Wszystkie"
         self._stops: dict = {}
+        self._all_stops: dict = {}  # id -> pełny obiekt przystanku
 
     async def _async_fetch_stops(self, keywords: list) -> dict:
-        """Pobiera przystanki używając aiohttp (natywny klient HA)."""
         try:
             session = async_get_clientsession(self.hass)
             async with session.get(STOPS_URL, timeout=15) as resp:
                 if resp.status != 200:
-                    _LOGGER.error("API ZTM zwróciło status %s", resp.status)
                     return {}
-
                 raw = await resp.json(content_type=None)
 
-            # Struktura: {"2026-02-26": {"lastUpdate": "...", "stops": [...]}}
             if isinstance(raw, dict):
                 date_key = next(iter(raw))
                 stops_list = raw[date_key].get("stops", [])
             elif isinstance(raw, list):
                 stops_list = raw
             else:
-                _LOGGER.error("Nieznana struktura JSON: %s", type(raw))
                 return {}
 
-            _LOGGER.debug("Pobrano %d przystanków z API", len(stops_list))
+            # Zapisz wszystkie przystanki do wyszukiwania po numerze
+            self._all_stops = {
+                str(s.get("stopId", "")): s for s in stops_list if s.get("stopId")
+            }
 
             result = {}
             for stop in stops_list:
                 name    = stop.get("stopName", "")
                 stop_id = str(stop.get("stopId", ""))
+                sub     = stop.get("subName", "")
+                desc    = stop.get("stopDesc", "")
+                label   = f"{name} {sub} — {desc} [{stop_id}]"
 
                 if not name or not stop_id:
                     continue
 
-                if not keywords:
-                    result[stop_id] = name
-                else:
-                    if any(kw.lower() in name.lower() for kw in keywords):
-                        result[stop_id] = name
+                if not keywords or any(kw.lower() in name.lower() for kw in keywords):
+                    result[stop_id] = label
 
-            sorted_result = dict(sorted(result.items(), key=lambda x: x[1]))
-            _LOGGER.debug("Po filtrowaniu: %d przystanków", len(sorted_result))
-            return sorted_result
+            return dict(sorted(result.items(), key=lambda x: x[1]))
 
         except Exception as e:
             _LOGGER.error("Błąd pobierania przystanków ZTM: %s", e)
             return {}
 
     async def async_step_user(self, user_input=None):
-        """Krok 1 — wybór lokalizacji / dzielnicy."""
-        if user_input is not None:
-            self._location = user_input["location"]
-            keywords = LOCATIONS.get(self._location, [])
+        """Krok 1 — wybór metody: dzielnica lub numer przystanku."""
+        errors = {}
 
-            # Pobieramy async — bez executor_job, bez requests
+        if user_input is not None:
+            method = user_input.get("method", "dzielnica")
+
+            if method == "numer":
+                return await self.async_step_by_number()
+
+            self._location = user_input.get("location", "Wszystkie")
+            keywords = LOCATIONS.get(self._location, [])
             self._stops = await self._async_fetch_stops(keywords)
 
             if not self._stops:
-                return self.async_show_form(
-                    step_id="user",
-                    data_schema=vol.Schema({
-                        vol.Required("location", default=self._location): vol.In(
-                            list(LOCATIONS.keys())
-                        )
-                    }),
-                    errors={"base": "cannot_connect"},
-                )
-
-            return await self.async_step_stop()
+                errors["base"] = "cannot_connect"
+            else:
+                return await self.async_step_stop()
 
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({
-                vol.Required("location", default="Wrzeszcz"): vol.In(
+                vol.Required("method", default="dzielnica"): vol.In({
+                    "dzielnica": "🗺️ Wybierz dzielnicę",
+                    "numer":     "🔢 Wpisz numer przystanku",
+                }),
+                vol.Optional("location", default="Wrzeszcz"): vol.In(
                     list(LOCATIONS.keys())
-                )
+                ),
             }),
+            errors=errors,
+        )
+
+    async def async_step_by_number(self, user_input=None):
+        """Krok 1b — wpisz numer przystanku ręcznie."""
+        errors = {}
+
+        if user_input is not None:
+            stop_id = str(user_input["stop_id"]).strip()
+
+            # Upewnij się że mamy załadowane przystanki
+            if not self._all_stops:
+                await self._async_fetch_stops([])
+
+            stop_data = self._all_stops.get(stop_id)
+            if not stop_data:
+                errors["stop_id"] = "stop_not_found"
+            else:
+                name      = stop_data.get("stopName", stop_id)
+                sub       = stop_data.get("subName", "")
+                desc      = stop_data.get("stopDesc", "")
+                max_dep   = user_input.get("max_departures", 6)
+
+                await self.async_set_unique_id(f"ztm_gdansk_{stop_id}")
+                self._abort_if_unique_id_configured()
+
+                return self.async_create_entry(
+                    title=f"ZTM — {name} {sub}",
+                    data={
+                        "stop_id":        stop_id,
+                        "stop_name":      f"{name} {sub}",
+                        "stop_desc":      desc,
+                        "location":       "Ręczny",
+                        "max_departures": max_dep,
+                    },
+                )
+
+        return self.async_show_form(
+            step_id="by_number",
+            data_schema=vol.Schema({
+                vol.Required("stop_id"): str,
+                vol.Optional("max_departures", default=6): vol.All(
+                    int, vol.Range(min=1, max=15)
+                ),
+            }),
+            errors=errors,
         )
 
     async def async_step_stop(self, user_input=None):
-        """Krok 2 — wybór konkretnego przystanku."""
+        """Krok 2 — wybór przystanku z listy."""
         if user_input is not None:
             stop_id   = user_input["stop_id"]
-            stop_name = self._stops.get(stop_id, stop_id)
+            stop_data = self._all_stops.get(stop_id, {})
+            name      = stop_data.get("stopName", stop_id)
+            sub       = stop_data.get("subName", "")
+            desc      = stop_data.get("stopDesc", "")
             max_dep   = user_input.get("max_departures", 6)
 
             await self.async_set_unique_id(f"ztm_gdansk_{stop_id}")
             self._abort_if_unique_id_configured()
 
             return self.async_create_entry(
-                title=f"ZTM — {stop_name}",
+                title=f"ZTM — {name} {sub}",
                 data={
                     "stop_id":        stop_id,
-                    "stop_name":      stop_name,
+                    "stop_name":      f"{name} {sub}",
+                    "stop_desc":      desc,
                     "location":       self._location,
                     "max_departures": max_dep,
                 },
@@ -146,8 +192,6 @@ class ZTMGdanskConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class ZTMOptionsFlow(config_entries.OptionsFlow):
-    """Pozwala edytować ustawienia po instalacji."""
-
     def __init__(self, config_entry):
         self.config_entry = config_entry
 
