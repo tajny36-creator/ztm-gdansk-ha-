@@ -2,32 +2,17 @@
   "config": {
     "step": {
       "user": {
-        "title": "ZTM Gdańsk — wybór przystanku",
-        "description": "Wybierz metodę wyszukiwania przystanku.",
+        "title": "ZTM Gdańsk — dodaj przystanek",
+        "description": "Podaj numer ID przystanku ZTM Gdańsk (np. 1234) oraz ile odjazdów ma być wyświetlanych.",
         "data": {
-          "method": "Metoda",
-          "location": "Dzielnica"
-        }
-      },
-      "by_number": {
-        "title": "Wpisz numer przystanku",
-        "description": "Podaj ID przystanku ZTM Gdańsk (np. 1234).",
-        "data": {
-          "stop_id": "Numer przystanku",
-          "max_departures": "Liczba odjazdów (1–15)"
-        }
-      },
-      "stop": {
-        "title": "Wybierz przystanek",
-        "data": {
-          "stop_id": "Przystanek",
+          "stop_id": "Numer przystanku (ID)",
           "max_departures": "Liczba odjazdów (1–15)"
         }
       }
     },
     "error": {
       "cannot_connect": "Nie można pobrać listy przystanków. Sprawdź połączenie z internetem.",
-      "stop_not_found": "Nie znaleziono przystanku o podanym numerze."
+      "stop_not_found": "Nie znaleziono przystanku o podanym numerze ID."
     },
     "abort": {
       "already_configured": "Ten przystanek jest już skonfigurowany."
