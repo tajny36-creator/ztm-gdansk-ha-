@@ -19,19 +19,26 @@ DEPARTURES_URL = "https://ckan2.multimediagdansk.pl/departures?stopId={stop_id}"
 SCAN_INTERVAL = timedelta(seconds=30)
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    stop_id   = entry.data["stop_id"]
-    stop_name = entry.data.get("stop_name", stop_id)
-    max_dep   = int(entry.data.get("max_departures", 6))
-
-    coordinator = ZTMCoordinator(hass, stop_id, max_dep)
-    await coordinator.async_config_entry_first_refresh()
-
-    async_add_entities([ZTMDepartureSensor(coordinator, entry, stop_name, max_dep)])
+async def _async_update_data(self):
+    url = DEPARTURES_URL.format(stop_id=self.stop_id)
+    try:
+        session = async_get_clientsession(self.hass)
+        async with session.get(url, timeout=10) as resp:
+            if resp.status != 200:
+                raise UpdateFailed(f"HTTP {resp.status}")
+            data = await resp.json(content_type=None)
+            
+            # Tymczasowe logowanie — usuń po debugowaniu
+            deps = data.get("departures", [])
+            _LOGGER.warning("ZTM RAW: liczba odjazdów=%s", len(deps))
+            if deps:
+                _LOGGER.warning("ZTM RAW: pierwszy wpis=%s", deps[0])
+            else:
+                _LOGGER.warning("ZTM RAW: klucze w odpowiedzi=%s", list(data.keys()))
+            
+            return data
+    except Exception as e:
+        raise UpdateFailed(f"Błąd pobierania odjazdów: {e}") from e
 
 
 class ZTMCoordinator(DataUpdateCoordinator):
