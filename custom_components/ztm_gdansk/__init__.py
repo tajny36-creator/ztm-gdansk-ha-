@@ -1,6 +1,7 @@
 """ZTM Gdańsk — integracja odjazdów autobusów i tramwajów."""
-import os
 import logging
+import os
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
@@ -12,11 +13,7 @@ PLATFORMS = ["sensor"]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    # Generuj kartę Lovelace w tle
-    hass.async_create_task(
-        _async_create_lovelace_card(hass, entry)
-    )
+    hass.async_create_task(_async_create_lovelace_card(hass, entry))
     return True
 
 
@@ -25,34 +22,37 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_create_lovelace_card(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Zapisuje gotową kartę Lovelace do pliku YAML."""
     stop_id   = entry.data["stop_id"]
     stop_name = entry.data.get("stop_name", stop_id)
-    max_dep   = entry.data.get("max_departures", 6)
+    max_dep   = int(entry.data.get("max_departures", 6))
     entity_id = f"sensor.ztm_{stop_id}"
 
     card_yaml = _build_card_yaml(entity_id, stop_name, max_dep)
 
     www_dir = hass.config.path("www/ztm_gdansk")
-    await hass.async_add_executor_job(os.makedirs, www_dir, 0o777, True)
-
-    card_path = os.path.join(www_dir, f"card_{stop_id}.yaml")
 
     def _write():
-        with open(card_path, "w", encoding="utf-8") as f:
+        os.makedirs(www_dir, exist_ok=True)
+        path = os.path.join(www_dir, f"card_{stop_id}.yaml")
+        with open(path, "w", encoding="utf-8") as f:
             f.write(card_yaml)
+        return path
 
     try:
-        await hass.async_add_executor_job(_write)
-        _LOGGER.info("ZTM Gdańsk: karta Lovelace zapisana → %s", card_path)
+        path = await hass.async_add_executor_job(_write)
+        _LOGGER.info("ZTM Gdańsk: karta zapisana → %s", path)
     except Exception as e:
         _LOGGER.error("ZTM Gdańsk: błąd zapisu karty: %s", e)
+        return
 
     hass.components.persistent_notification.async_create(
         message=(
-            f"✅ **ZTM Gdańsk** — przystanek **{stop_name}** gotowy!\n\n"
+            f"✅ Przystanek **{stop_name}** (`{stop_id}`) dodany!\n\n"
             f"Karta Lovelace zapisana w:\n"
-            f"`config/www/ztm_gdansk/card_{stop_id}.yaml`"
+            f"`config/www/ztm_gdansk/card_{stop_id}.yaml`\n\n"
+            f"Aby dodać kartę do dashboardu:\n"
+            f"1. Edytuj dashboard → **Dodaj kartę** → **Ręczna konfiguracja YAML**\n"
+            f"2. Wklej zawartość pliku `card_{stop_id}.yaml`"
         ),
         title="ZTM Gdańsk 🚌",
         notification_id=f"ztm_card_{stop_id}",
@@ -60,20 +60,23 @@ async def _async_create_lovelace_card(hass: HomeAssistant, entry: ConfigEntry) -
 
 
 def _build_card_yaml(entity_id: str, stop_name: str, max_dep: int) -> str:
-    rows = "\n".join([
-        f"""      - type: conditional
+    rows = ""
+    for i in range(max_dep):
+        rows += f"""      - type: conditional
         conditions:
           - condition: template
-            value_template: >
-              {{{{ state_attr('{entity_id}', 'odjazdy') | length > {i} }}}}
+            value_template: >-
+              {{{{ (state_attr('{entity_id}', 'odjazdy') or []) | length > {i} }}}}
         row:
-          type: section
-          label: >
-            {{{{ state_attr('{entity_id}', 'odjazdy')[{i}].linia }}}}
-            → {{{{ state_attr('{entity_id}', 'odjazdy')[{i}].kierunek }}}}
-            za {{{{ state_attr('{entity_id}', 'odjazdy')[{i}].za_minuty }}}} min"""
-        for i in range(max_dep)
-    ])
+          type: attribute
+          entity: {entity_id}
+          attribute: tablica
+          name: >-
+            {{{{ (state_attr('{entity_id}', 'odjazdy') or [])[{i}]['linia'] | default('') }}}}
+            → {{{{ (state_attr('{entity_id}', 'odjazdy') or [])[{i}]['kierunek'] | default('') }}}}
+          suffix: >-
+            za {{{{ (state_attr('{entity_id}', 'odjazdy') or [])[{i}]['za_minuty'] | default('?') }}}} min
+\n"""
 
     return f"""type: vertical-stack
 cards:
@@ -82,8 +85,9 @@ cards:
     name: "{stop_name}"
     icon: mdi:bus-stop
 
-  - type: entities
-    title: Najbliższe odjazdy
-    entities:
-{rows}
+  - type: markdown
+    content: >
+      ## 🚌 Najbliższe odjazdy — {stop_name}
+
+      {{{{ state_attr('{entity_id}', 'tablica') }}}}
 """
