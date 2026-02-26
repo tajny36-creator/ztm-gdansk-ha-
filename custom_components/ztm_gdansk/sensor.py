@@ -19,26 +19,19 @@ DEPARTURES_URL = "https://ckan2.multimediagdansk.pl/departures?stopId={stop_id}"
 SCAN_INTERVAL = timedelta(seconds=30)
 
 
-async def _async_update_data(self):
-    url = DEPARTURES_URL.format(stop_id=self.stop_id)
-    try:
-        session = async_get_clientsession(self.hass)
-        async with session.get(url, timeout=10) as resp:
-            if resp.status != 200:
-                raise UpdateFailed(f"HTTP {resp.status}")
-            data = await resp.json(content_type=None)
-            
-            # Tymczasowe logowanie — usuń po debugowaniu
-            deps = data.get("departures", [])
-            _LOGGER.warning("ZTM RAW: liczba odjazdów=%s", len(deps))
-            if deps:
-                _LOGGER.warning("ZTM RAW: pierwszy wpis=%s", deps[0])
-            else:
-                _LOGGER.warning("ZTM RAW: klucze w odpowiedzi=%s", list(data.keys()))
-            
-            return data
-    except Exception as e:
-        raise UpdateFailed(f"Błąd pobierania odjazdów: {e}") from e
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    stop_id   = entry.data["stop_id"]
+    stop_name = entry.data.get("stop_name", stop_id)
+    max_dep   = int(entry.data.get("max_departures", 6))
+
+    coordinator = ZTMCoordinator(hass, stop_id, max_dep)
+    await coordinator.async_config_entry_first_refresh()
+
+    async_add_entities([ZTMDepartureSensor(coordinator, entry, stop_name, max_dep)])
 
 
 class ZTMCoordinator(DataUpdateCoordinator):
@@ -59,7 +52,10 @@ class ZTMCoordinator(DataUpdateCoordinator):
             async with session.get(url, timeout=10) as resp:
                 if resp.status != 200:
                     raise UpdateFailed(f"HTTP {resp.status}")
-                return await resp.json(content_type=None)
+                data = await resp.json(content_type=None)
+                deps = data.get("departures", [])
+                _LOGGER.debug("ZTM RAW: liczba=%s", len(deps))
+                return data
         except Exception as e:
             raise UpdateFailed(f"Błąd pobierania odjazdów: {e}") from e
 
@@ -103,62 +99,39 @@ class ZTMDepartureSensor(CoordinatorEntity, SensorEntity):
 
         for dep in departures:
             try:
-                estimated  = dep.get("estimatedTime", "") or dep.get("theoreticalTime", "")
-                scheduled  = dep.get("theoreticalTime", "")
-                line       = str(dep.get("routeShortName", dep.get("routeId", "?")))
-                headsign   = dep.get("headsign", dep.get("tripHeadsign", ""))
+                estimated = dep.get("estimatedTime") or dep.get("theoreticalTime")
+                scheduled = dep.get("theoreticalTime") or estimated
+                line      = str(dep.get("routeShortName", dep.get("routeId", "?")))
+                headsign  = dep.get("headsign", "")
 
                 if not estimated:
                     continue
 
-                # Parsuj czas — format "HH:MM:SS" lub ISO
-                def parse_time(t: str) -> datetime | None:
-                    if not t:
-                        return None
-                    try:
-                        today = now.date()
-                        h, m, s = map(int, t.strip().split(":"))
-                        # Obsługa kursów po północy (h >= 24)
-                        dt = datetime(today.year, today.month, today.day,
-                                      tzinfo=timezone.utc) + timedelta(hours=h, minutes=m, seconds=s)
-                        # Jeśli czas jest w przeszłości > 1h, to pewnie jutrzejszy
-                        if (now - dt).total_seconds() > 3600:
-                            dt += timedelta(days=1)
-                        return dt
-                    except Exception:
-                        return None
+                # API zwraca ISO 8601 np. "2026-02-27T00:00:00Z"
+                est_dt = datetime.fromisoformat(estimated.replace("Z", "+00:00"))
+                sch_dt = datetime.fromisoformat(scheduled.replace("Z", "+00:00"))
 
-                est_dt  = parse_time(estimated)
-                sch_dt  = parse_time(scheduled)
-
-                if est_dt is None:
+                in_sec = (est_dt - now).total_seconds()
+                if in_sec < -60:
                     continue
 
-                in_sec  = (est_dt - now).total_seconds()
-                if in_sec < -60:
-                    continue  # już odjechał
+                in_min = max(0, int(in_sec // 60))
 
-                in_min  = max(0, int(in_sec // 60))
+                # Opóźnienie — najpierw z pola delayInSeconds, fallback z różnicy czasów
+                delay_sec = dep.get("delayInSeconds") or int((est_dt - sch_dt).total_seconds())
 
-                delay_sec = 0
-                if sch_dt:
-                    delay_sec = int((est_dt - sch_dt).total_seconds())
-
-                if delay_sec > 60:
-                    delay_str = f"+{delay_sec // 60} min"
-                    status    = "opóźniony"
-                elif delay_sec < -60:
-                    delay_str = f"{delay_sec // 60} min"
-                    status    = "wcześniej"
+                if delay_sec is not None and delay_sec > 60:
+                    delay_str, status = f"+{delay_sec // 60} min", "opóźniony"
+                elif delay_sec is not None and delay_sec < -60:
+                    delay_str, status = f"{delay_sec // 60} min", "wcześniej"
                 else:
-                    delay_str = "na czas"
-                    status    = "punktualny"
+                    delay_str, status = "na czas", "punktualny"
 
                 result.append({
                     "linia":       line,
                     "kierunek":    headsign,
-                    "odjazd":      scheduled,
-                    "rzeczywisty": estimated,
+                    "odjazd":      sch_dt.strftime("%H:%M"),
+                    "rzeczywisty": est_dt.strftime("%H:%M"),
                     "opoznienie":  delay_str,
                     "status":      status,
                     "za_minuty":   in_min,
