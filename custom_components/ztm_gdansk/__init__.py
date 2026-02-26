@@ -4,6 +4,7 @@ import os
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.components.persistent_notification import async_create
 
 _LOGGER = logging.getLogger(__name__)
 DOMAIN = "ztm_gdansk"
@@ -45,7 +46,8 @@ async def _async_create_lovelace_card(hass: HomeAssistant, entry: ConfigEntry) -
         _LOGGER.error("ZTM Gdańsk: błąd zapisu karty: %s", e)
         return
 
-    hass.components.persistent_notification.async_create(
+    async_create(
+        hass,
         message=(
             f"✅ Przystanek **{stop_name}** (`{stop_id}`) dodany!\n\n"
             f"Karta Lovelace zapisana w:\n"
