@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "ZTM Gdańsk — Wybierz lokalizację",
+        "data": {
+          "location": "Dzielnica / obszar"
+        }
+      },
+      "stop": {
+        "title": "ZTM Gdańsk — Wybierz przystanek",
+        "data": {
+          "stop_id": "Przystanek",
+          "max_departures": "Liczba wyświetlanych odjazdów"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Nie można pobrać listy przystanków. Sprawdź połączenie z internetem i spróbuj ponownie."
+    },
+    "abort": {
+      "already_configured": "Ten przystanek jest już skonfigurowany."
+    }
+  }
+}
